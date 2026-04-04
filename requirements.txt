@@ -1,0 +1,14 @@
+matplotlib==3.7.2
+numpy==1.26.4
+openpyxl==3.1.5
+pandas==2.2.3
+pillow==11.3.0
+scikit-learn==1.2.2
+torch @ https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp311-cp311-linux_x86_64.whl
+torchvision @ https://download.pytorch.org/whl/cu124/torchvision-0.21.0%2Bcu124-cp311-cp311-linux_x86_64.whl
+# ── API server ────────────────────────────────────────────────────────────────
+fastapi==0.115.13
+uvicorn==0.34.3
+python-multipart==0.0.20
+pydantic==2.11.7
+starlette==0.46.2
