@@ -1,0 +1,9 @@
+Label,Full Name,N_positive,N_negative,Percentage,Pos_Weight
+N,Normal,1140,2360,32.6%,2.0702
+D,Diabetic Retinopathy,1128,2372,32.2%,2.1028
+G,Glaucoma,215,3285,6.1%,15.2791
+C,Cataract,212,3288,6.1%,15.5094
+A,Age-related Macular Degeneration,164,3336,4.7%,20.3415
+H,Hypertension,103,3397,2.9%,32.9806
+M,Myopia,174,3326,5.0%,19.1149
+O,Other Diseases,979,2521,28.0%,2.5751
