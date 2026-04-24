@@ -1,0 +1,2 @@
+Model,Macro AUC-ROC,Macro F1 (F1opt),Hamming Loss,Cohen Kappa
+InceptionResNet (anti-overfit),0.8445,0.6000,0.1350,0.5030
