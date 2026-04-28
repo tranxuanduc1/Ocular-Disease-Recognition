@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
+import timm
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
@@ -36,108 +37,103 @@ LABEL_NAMES = {
     "O": "Other diseases",
 }
 
-# Resolve model path relative to this file (project/ → repo root)
-MODEL_PATH = Path(__file__).parent.parent / "best_multimodal_model.pth"
+MODEL_PATH = (
+    Path(__file__).parent.parent
+    / "model_v2_result/inceptionresnet_v2/checkpoints/inceptionresnet_best.pth"
+)
 
-IMAGE_SIZE = 128
-THRESHOLD = 0.5
+IMAGE_SIZE = 299
 
-# Training-time StandardScaler statistics for age
-AGE_MEAN = 50.0
-AGE_STD = 20.0
+# Optimal thresholds per class (tuned on validation set, from 07_evaluation.ipynb)
+THRESHOLDS = {
+    "N": 0.35, "D": 0.45, "G": 0.70, "C": 0.85,
+    "A": 0.90, "H": 0.70, "M": 0.65, "O": 0.45,
+}
+
+# From model_v2_result/inceptionresnet_v2/norm_params.json
+AGE_MEAN = 57.821443130860175
+AGE_STD = 11.769395711092763
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------------------------------------------------------------------
-# Model Architecture (mirrors multi-v1.ipynb exactly)
+# Model Architecture
 # ---------------------------------------------------------------------------
 
 
-class LightweightCNN(nn.Module):
-    def __init__(self):
+class SiameseMultimodalNet(nn.Module):
+    def __init__(
+        self,
+        backbone_name,
+        proj_dim=128,
+        tabular_dim=16,
+        dropout=0.4,
+        num_classes=8,
+        use_batchnorm=False,
+    ):
         super().__init__()
-        self.features = nn.Sequential(
-            # Block 1: 3 → 32
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-            # Block 2: 32 → 64
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-            # Block 3: 64 → 128
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-            # Block 4: 128 → 128
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
+        self.backbone = timm.create_model(
+            backbone_name, pretrained=False, num_classes=0, global_pool="avg"
         )
-
-    def forward(self, x):
-        x = self.features(x)
-        return x.view(x.size(0), -1)
-
-
-class MultimodalFundusModel(nn.Module):
-    def __init__(self, num_classes=8):
-        super().__init__()
-        self.image_encoder = LightweightCNN()
-
+        feat_dim = self.backbone.num_features
+        self.projector = nn.Sequential(
+            nn.Linear(feat_dim, proj_dim), nn.ReLU(inplace=True), nn.Dropout(dropout)
+        )
         self.tabular_encoder = nn.Sequential(
-            nn.Linear(2, 16),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(16, 32),
-            nn.ReLU(),
+            nn.Linear(3, tabular_dim), nn.ReLU(inplace=True)
         )
+        fused_dim = 2 * proj_dim + tabular_dim
+        if use_batchnorm:
+            self.classifier = nn.Sequential(
+                nn.Linear(fused_dim, 64),
+                nn.BatchNorm1d(64),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+                nn.Linear(64, num_classes),
+            )
+        else:
+            self.classifier = nn.Sequential(
+                nn.Linear(fused_dim, 64),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+                nn.Linear(64, num_classes),
+            )
 
-        fused_dim = 128 * 2 + 32  # left(128) + right(128) + tabular(32)
+    def forward_one(self, x):
+        return self.projector(self.backbone(x))
 
-        self.classifier = nn.Sequential(
-            nn.Linear(fused_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(64, num_classes),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, left_img, right_img, tabular_data):
-        left_feat = self.image_encoder(left_img)
-        right_feat = self.image_encoder(right_img)
-        tab_feat = self.tabular_encoder(tabular_data)
-        fused = torch.cat([left_feat, right_feat, tab_feat], dim=1)
-        return self.classifier(fused)
+    def forward(self, left, right, tabular):
+        img_feat = torch.cat([self.forward_one(left), self.forward_one(right)], dim=1)
+        return self.classifier(torch.cat([img_feat, self.tabular_encoder(tabular)], dim=1))
 
 
 # ---------------------------------------------------------------------------
 # Global model state
 # ---------------------------------------------------------------------------
 
-_model: Optional[MultimodalFundusModel] = None
+_model: Optional[SiameseMultimodalNet] = None
 _models_loaded: bool = False
 
 
 def load_model() -> None:
     global _model, _models_loaded
     checkpoint = torch.load(MODEL_PATH, map_location=device, weights_only=False)
-    _model = MultimodalFundusModel(num_classes=len(TARGET_COLS))
+    _model = SiameseMultimodalNet(
+        backbone_name="inception_resnet_v2",
+        proj_dim=128,
+        tabular_dim=16,
+        dropout=0.4,
+        num_classes=len(TARGET_COLS),
+        use_batchnorm=True,
+    )
     _model.load_state_dict(checkpoint["model_state_dict"])
     _model.to(device)
     _model.eval()
     _models_loaded = True
     epoch = checkpoint.get("epoch", "?")
-    val_acc = checkpoint.get("val_acc")
-    if isinstance(val_acc, float):
-        print(f"Model loaded from epoch {epoch} (val_acc={val_acc:.4f})")
+    val_auc = checkpoint.get("val_auc")
+    if isinstance(val_auc, float):
+        print(f"Model loaded from epoch {epoch} (val_auc={val_auc:.4f})")
     else:
         print(f"Model loaded from epoch {epoch}")
 
@@ -160,6 +156,12 @@ _hflip = transforms.RandomHorizontalFlip(p=1.0)
 def preprocess_image(pil_img: Image.Image) -> torch.Tensor:
     """Return a (1, 3, H, W) tensor ready for the model."""
     return _transform(pil_img.convert("RGB")).unsqueeze(0).to(device)
+
+
+def encode_gender(gender_str: Optional[str]) -> List[float]:
+    """One-hot encode gender: [1, 0] = Male, [0, 1] = Female."""
+    s = gender_str.strip().lower() if gender_str else ""
+    return [1.0, 0.0] if s in ("male", "m") else [0.0, 1.0]
 
 
 async def read_image(upload: UploadFile) -> Image.Image:
@@ -185,7 +187,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Ocular Disease Recognition API",
     description="Multi-label fundus disease classification (N/D/G/C/A/H/M/O).",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -214,8 +216,8 @@ async def predict(
     - **1 image**: used as the left eye; a horizontal mirror serves as the right eye.
     - **2 images**: first = left eye, second = right eye.
 
-    Optional `age` defaults to the training-set mean (50). Optional `gender`
-    defaults to Male (0) when omitted.
+    Optional `age` defaults to the training-set mean (~58). Optional `gender`
+    defaults to Female when omitted.
     """
     if not _models_loaded or _model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded yet.")
@@ -228,7 +230,6 @@ async def predict(
     if len(file) == 2:
         right_pil = await read_image(file[1])
     else:
-        # Symmetrical mirror for the missing eye
         right_pil = _hflip(left_pil.convert("RGB"))
 
     left_tensor = preprocess_image(left_pil)
@@ -238,24 +239,21 @@ async def predict(
     age_val = float(age) if age is not None else AGE_MEAN
     age_normalized = (age_val - AGE_MEAN) / AGE_STD
 
-    gender_map = {"m": 0, "male": 0, "f": 1, "female": 1}
-    gender_encoded = gender_map.get(gender.strip().lower(), 0) if gender else 0
-
+    gender_encoded = encode_gender(gender)
     tabular_tensor = torch.tensor(
-        [[age_normalized, float(gender_encoded)]], dtype=torch.float32
+        [[age_normalized] + gender_encoded], dtype=torch.float32
     ).to(device)
 
     # --- Inference ---
     with torch.no_grad():
-        output = _model(left_tensor, right_tensor, tabular_tensor)
-        probs = output[0].tolist()
+        logits = _model(left_tensor, right_tensor, tabular_tensor)
+        probs = torch.sigmoid(logits)[0].tolist()
 
     # --- Build response ---
     raw_outputs = {col: round(prob, 4) for col, prob in zip(TARGET_COLS, probs)}
 
-    positive = [col for col, prob in zip(TARGET_COLS, probs) if prob >= THRESHOLD]
+    positive = [col for col, prob in zip(TARGET_COLS, probs) if prob >= THRESHOLDS[col]]
 
-    # Fall back to top-1 class if nothing clears the threshold
     if not positive:
         top_idx = int(torch.tensor(probs).argmax().item())
         positive = [TARGET_COLS[top_idx]]
