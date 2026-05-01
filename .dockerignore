@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.ipynb
+.git/
+.gitignore
+odir-data/
+model_v2/
+model_v2_result/efficientnetb3/
+model_v2_result/inceptionresnet/
+model_v2_result/resnet50/
+sample/
+api.py
+*.md

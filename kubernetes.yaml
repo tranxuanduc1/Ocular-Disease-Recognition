@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocular-model-service
+  labels:
+    app: ocular-model-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ocular-model-service
+  template:
+    metadata:
+      labels:
+        app: ocular-model-service
+    spec:
+      containers:
+        - name: ocular-model-service
+          image: xuanduck/ocular-model-service:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8002
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocular-model-service
+spec:
+  type: ClusterIP
+  selector:
+    app: ocular-model-service
+  ports:
+    - port: 80
+      targetPort: 8002
+      protocol: TCP
